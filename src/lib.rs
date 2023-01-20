@@ -1,5 +1,5 @@
 use detour::static_detour;
-use lazy_static::lazy_static;
+use std::str::FromStr;
 use std::{
     error::Error,
     ffi::{CString, NulError},
@@ -7,7 +7,7 @@ use std::{
     net::TcpStream,
     ops::Sub,
     sync::Mutex,
-    time::{self, Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use winapi::{
     shared::minwindef::{FILETIME, LPFILETIME},
@@ -15,9 +15,8 @@ use winapi::{
 };
 extern crate ctor;
 
-lazy_static! {
-    static ref TIME_CONFIG: Mutex<TimeConfig> = Mutex::new(TimeConfig::new(0, 0, true, true));
-}
+static TIME_CONFIG: Mutex<TimeConfig> = Mutex::new(TimeConfig::new(0, 0, true, true));
+
 static_detour! {
     static get_system_time_as_file_time_detour: extern "system" fn(LPFILETIME);
 }
@@ -40,7 +39,7 @@ struct TimeConfig {
 }
 
 impl TimeConfig {
-    fn new(base_time: u64, new_time: u64, real_time: bool, move_forward: bool) -> TimeConfig {
+    const fn new(base_time: u64, new_time: u64, real_time: bool, move_forward: bool) -> TimeConfig {
         TimeConfig {
             base_time,
             new_time,
@@ -121,21 +120,21 @@ impl Error for HookError {}
 impl From<detour::Error> for HookError {
     fn from(value: detour::Error) -> Self {
         HookError {
-            message: format!("detour::Error {:?}", value),
+            message: format!("detour::Error {value:?}"),
         }
     }
 }
 impl From<NulError> for HookError {
     fn from(value: NulError) -> Self {
         HookError {
-            message: format!("NulError {:?}", value),
+            message: format!("NulError {value:?}"),
         }
     }
 }
 impl From<std::io::Error> for HookError {
     fn from(value: std::io::Error) -> Self {
         HookError {
-            message: format!("std::io::Error {:?}", value),
+            message: format!("std::io::Error {value:?}"),
         }
     }
 }
@@ -143,7 +142,7 @@ impl From<std::io::Error> for HookError {
 /// Send a string through TcpStream
 fn log(stream: &TcpStream, msg: &str) -> Result<(), std::io::Error> {
     let mut stream_clone = stream.try_clone()?;
-    stream_clone.write(msg.as_bytes())?;
+    let _ = stream_clone.write(msg.as_bytes())?;
 
     Ok(())
 }
@@ -162,7 +161,7 @@ unsafe fn find_hook_fn() -> Result<(), HookError> {
     // assume server is running and able to be connected to
     let stream = TcpStream::connect("127.0.0.1:63463")?;
     // read timeout in order to prevent halting the process calling GetSystemTimeAsFileTime
-    stream.set_read_timeout(Some(time::Duration::new(0, 100)))?;
+    stream.set_read_timeout(Some(Duration::new(0, 100)))?;
 
     // find GetSystemTimeAsFileTime
     let module_name = CString::new("kernel32.dll")?;
@@ -206,20 +205,20 @@ extern "system" fn get_system_time_as_file_time_hook(
         Ok((buf, size)) => {
             // assume that the server plays nice and sends properly formatted data
             let buf = &buf[0..size];
-            let command: Vec<&str> = std::str::from_utf8(&buf).unwrap().split(" ").collect();
-            let timestamp = str::parse::<u64>(command[0]).unwrap();
-            let real_time = str::parse::<i8>(command[1]).unwrap() == 1;
-            let move_forward = str::parse::<i8>(command[2]).unwrap() == 1;
-            let update_base_time = str::parse::<i8>(command[3]).unwrap() == 1;
+            let command = std::str::from_utf8(buf)
+                .unwrap()
+                .split(' ')
+                .collect::<Vec<_>>();
+            let timestamp = u64::from_str(command[0]).unwrap_or_default();
+            let real_time = u8::from_str(command[1]).unwrap_or_default() == 1;
+            let move_forward = u8::from_str(command[2]).unwrap_or_default() == 1;
+            let update_base_time = u8::from_str(command[3]).unwrap_or_default() == 1;
             time_config.update_settings(timestamp, real_time, move_forward, update_base_time);
             // echo parsed data
             log(
                 stream,
-                format!(
-                    "{:?} {} {} {} {}",
-                    command, timestamp, real_time, move_forward, update_base_time
-                )
-                .as_str(),
+                format!("{command:?} {timestamp} {real_time} {move_forward} {update_base_time}")
+                    .as_str(),
             )
             // errors here should be ignored to avoid crashing the process in the event that the server is no longer active
             .unwrap_or(());
